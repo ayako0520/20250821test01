@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Falling Fruits — Enhanced</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{background:#f6fbff;overflow:hidden;font:600 16px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif}
+  canvas{display:block;width:100vw;height:100vh;background:#fff}
+  .hud{position:fixed;left:10px;top:10px;right:10px;display:flex;gap:10px;justify-content:space-between;pointer-events:none}
+  .pill{background:#00000014;color:#111;padding:8px 12px;border-radius:999px;backdrop-filter:blur(4px)}
+  .right{display:flex;gap:8px}
+  .center{position:fixed;inset:0;display:grid;place-items:center}
+  .panel{background:#fff;padding:20px 24px;border-radius:16px;box-shadow:0 24px 60px #0002;text-align:center;min-width:min(92vw,520px)}
+  .panel h1{margin:.2rem 0 .4rem;font:800 clamp(20px,4vw,32px)/1.1 system-ui}
+  .panel p{margin:.2rem 0 .6rem;color:#475569}
+  .panel .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:.5rem}
+  .panel select,.panel label{padding:10px 12px;border-radius:999px;border:1px solid #e2e8f0;background:#f8fafc}
+  .panel button{margin-top:.6rem;padding:12px 18px;border:0;border-radius:999px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:800;cursor:pointer}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<div class="hud">
+  <div class="pill">🍓 SCORE <span id="score">0</span> <span id="combo" aria-live="polite"></span></div>
+  <div class="right">
+    <div class="pill">❤️ MISSES <span id="miss">0/3</span></div>
+    <div class="pill">🏆 BEST <span id="best">0</span></div>
+    <div class="pill">⚙️ <span id="lvl">Lv.1</span></div>
+  </div>
+</div>
+<div class="center" id="overlay">
+  <div class="panel">
+    <h1>FALLING FRUITS</h1>
+    <p>サイズ/速度はランダム。スコアで自動的に難易度UP。ときどきパワーアップ🥝🍀❤️⭐️が落ちます。</p>
+    <p>操作：← → キー／マウス（指）で左右　Pで一時停止</p>
+    <div class="row">
+      <label><input type="checkbox" id="sound" checked> 🔊 サウンド</label>
+      <label>難易度
+        <select id="mode">
+          <option value="easy">EASY</option>
+          <option value="normal">NORMAL</option>
+          <option value="hard">HARD</option>
+        </select>
+      </label>
+    </div>
+    <button id="start">▶ はじめる</button>
+    <div style="margin-top:.4rem;color:#64748b" id="summary"></div>
+  </div>
+</div>
+<canvas id="cv" aria-label="Falling fruits game area"></canvas>
+<script>
+(()=>{'use strict';
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), missEl=document.getElementById('miss'), bestEl=document.getElementById('best');
+const overlay=document.getElementById('overlay'), startBtn=document.getElementById('start');
+const comboEl=document.getElementById('combo'), lvlEl=document.getElementById('lvl');
+const modeSel=document.getElementById('mode'), soundChk=document.getElementById('sound'), summary=document.getElementById('summary');
+let W=0,H=0,dpr=1,last=0,raf=0,paused=false,slowMoT=0;
+const FRUITS=['🍎','🍌','🍊','🍇','🍓','🍒','🍍','🥝','🍑'];
+const POWERUPS=[{sym:'❤️',kind:'life'},{sym:'🍀',kind:'slow'},{sym:'⭐',kind:'star'}];
+const SND=(()=>{let ctxA;const act=()=>{if(!soundChk.checked)return;ctxA??=new (window.AudioContext||window.webkitAudioContext)();if(ctxA.state==='suspended')ctxA.resume()};
+  const b=(f=440,t=0.07,tt=0)=>{act();if(!ctxA)return;const o=ctxA.createOscillator(),g=ctxA.createGain();o.type='sine';o.frequency.setValueAtTime(f,ctxA.currentTime+tt);g.gain.setValueAtTime(.08,ctxA.currentTime+tt);g.gain.exponentialRampToValueAtTime(0.0001,ctxA.currentTime+tt+t);o.connect(g).connect(ctxA.destination);o.start(ctxA.currentTime+tt);o.stop(ctxA.currentTime+tt+t)};return{ok:()=>b(880,.05), miss:()=>b(220,.09), star:()=>b(1320,.08), life:()=>b(660,.08), slow:()=>{b(500,.05);b(300,.09,.03)}}})();
+const game={run:false,score:0,best:parseInt(localStorage.getItem('ff_best')||'0'),miss:0,maxMiss:3,spawn:0,fruits:[],parts:[],pointerX:null,combo:0,level:1,time:0,base:{maxConcurrent:2,minSpawnGap:520,spawnInt:1300,speed:1.0}};
+function setMode(m){const cfg={easy:{con:2,gap:540,int:1300,spd:0.95},normal:{con:3,gap:500,int:1100,spd:1.0},hard:{con:4,gap:460,int:950,spd:1.06}}[m];game.base={maxConcurrent:cfg.con,minSpawnGap:cfg.gap,spawnInt:cfg.int,speed:cfg.spd}; summary.textContent=`初期設定：同時${cfg.con}個・出現間隔≈${cfg.int}ms・速度×${cfg.spd.toFixed(2)}`}
+setMode(modeSel.value);modeSel.addEventListener('change',e=>setMode(e.target.value));
+function resize(){const w=innerWidth,h=innerHeight; dpr=Math.min(devicePixelRatio||1,2); cv.width=w*dpr; cv.height=h*dpr; cv.style.width=w+'px'; cv.style.height=h+'px'; ctx.setTransform(dpr,0,0,dpr,0,0); W=w; H=h; const bw=Math.max(140,Math.min(280,Math.round(W*0.22))); game.basket.w=bw; game.basket.h=Math.max(30,Math.round(W*0.02)+22); game.basket.y=H-Math.max(76,Math.round(H*0.10)); if(!game.basket.x) game.basket.x=W/2;}
+addEventListener('resize',resize,{passive:true});
+function clamp(v,a,b){return v<a?a:(v>b?b:v)}
+function rand(a,b){return Math.random()*(b-a)+a}
+function choice(arr){return arr[(Math.random()*arr.length)|0]}
+function canSpawn(now){const maxC=game.base.maxConcurrent+Math.min(4,Math.floor(game.score/20)); if(game.fruits.length>=maxC) return false; if(now - game.lastSpawnT < game.base.minSpawnGap*easeFactor()) return false; return true}
+function easeFactor(){const t=Math.min(1,game.score/120);return 1-0.45*t}
+function speedFactor(){const t=Math.min(1,game.score/150);return game.base.speed*(1+0.55*t)}
+function intervalMs(){const base=game.base.spawnInt;const t=Math.min(1,game.score/180);return Math.max(360, base*(1-0.55*t))}
+function spawnFruit(){const isPower=Math.random()<Math.min(0.08,0.02+game.score*0.0008);
+  const size=Math.round(rand(56,112)); const base=rand(90,155)*speedFactor(); const speed=base * rand(0.85,1.12); const x=rand(size/2, W-size/2);
+  let sym=choice(FRUITS),kind='fruit',value=1; if(isPower){const p=choice(POWERUPS);sym=p.sym;kind=p.kind;value=(kind==='star'?5:0)}
+  game.fruits.push({x,y:-size,vy:speed,swayA:rand(4,10),swayW:rand(0.8,1.6),t:rand(0,Math.PI*2),sym,kind,size,value});}
+function addConfetti(x,y,color){for(let i=0;i<6;i++)game.parts.push({x,y,vx:rand(-120,120),vy:rand(-200,-100),g:520,r:rand(3,6),life:rand(.35,.7),t:0,c:color||`hsl(${(Math.random()*360)|0} 90% 60%)`})}
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath()}
+function drawBasket(){const b=game.basket,r=Math.min(18,b.h/2); ctx.save(); ctx.translate(b.x,b.y); ctx.fillStyle='rgba(0,0,0,.10)'; roundRect(-b.w/2,12,b.w,12,6); ctx.fill(); const grd=ctx.createLinearGradient(-b.w/2,0,b.w/2,b.h); grd.addColorStop(0,'#ffd166'); grd.addColorStop(1,'#fca311'); roundRect(-b.w/2,0,b.w,b.h,r); ctx.fillStyle=grd; ctx.fill(); roundRect(-b.w/2,-10,b.w,14,10); ctx.fillStyle='#ffb703'; ctx.fill(); ctx.restore()}
+function refreshHud(){scoreEl.textContent=game.score; missEl.textContent=`${game.miss}/${game.maxMiss}`; bestEl.textContent=game.best; lvlEl.textContent=`Lv.${game.level}`}
+const keys={ArrowLeft:false,ArrowRight:false};
+addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();keys[e.key]=true} if(e.key===' '&&!game.run){e.preventDefault();start()} if(e.key==='p'||e.key==='P'||e.key==='Escape'){togglePause()}});
+addEventListener('keyup',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();keys[e.key]=false}});
+addEventListener('pointermove',e=>{game.pointerX=e.clientX},{passive:true});
+function applyPower(kind){if(kind==='life'){if(game.miss>0){game.miss--;SND.life();addConfetti(game.basket.x,game.basket.y-10,'#f43f5e')}}
+  else if(kind==='slow'){slowMoT=Math.max(slowMoT,3.5);SND.slow();}
+  else if(kind==='star'){game.score+=5;SND.star();}}
+function update(dt,now){if(paused)return; const b=game.basket; const dir=(keys.ArrowLeft?-1:0)+(keys.ArrowRight?1:0); b.vx=dir*b.spd; b.x+=b.vx*dt; if(game.pointerX!=null){b.x+=(game.pointerX-b.x)*Math.min(1,dt*10)} b.x=clamp(b.x,b.w/2+8,W-b.w/2-8); game.time+=dt; game.level=1+Math.floor(game.score/25);
+  game.spawn-=dt*1000; if(game.spawn<=0 && canSpawn(now)){spawnFruit(); game.lastSpawnT=now; game.spawn=intervalMs()*rand(0.9,1.1)}
+  const slowF=slowMoT>0?0.55:1; slowMoT=Math.max(0,slowMoT-dt);
+  for(let i=game.fruits.length-1;i>=0;i--){const f=game.fruits[i]; f.t+=dt*f.swayW; f.y+=f.vy*dt*slowF; f.x+=Math.sin(f.t)*f.swayA*dt; const r=f.size*0.5; const catchBandTop=b.y - Math.max(28, r*0.35); const catchBandBot=b.y + b.h + 6; const inX=(Math.abs(f.x-b.x) < (b.w*0.55)); const touchY=(f.y+r>=catchBandTop)&&(f.y-r<=catchBandBot);
+    if(inX && touchY){ if(f.kind==='fruit'){game.combo++; const mult=1+Math.min(3,Math.floor(game.combo/5)); game.score+=mult; comboEl.textContent=mult>1?`x${mult}`:''; addConfetti(f.x,b.y); SND.ok()} else {applyPower(f.kind); game.combo=Math.max(0,game.combo-1); comboEl.textContent=game.combo>=5?`x${1+Math.min(3,Math.floor(game.combo/5))}`:''}
+      game.fruits.splice(i,1); refreshHud(); continue }
+    if(f.y - r > H){game.miss++; game.combo=0; comboEl.textContent=''; addConfetti(f.x,H-40,'#ff6b6b'); SND.miss(); game.fruits.splice(i,1); refreshHud(); if(game.miss>=game.maxMiss){return gameOver()}}
+  }
+  for(let i=game.parts.length-1;i>=0;i--){const p=game.parts[i]; p.t+=dt; if(p.t>p.life){game.parts.splice(i,1); continue} p.vy+=p.g*dt; p.x+=p.vx*dt; p.y+=p.vy*dt}
+}
+function draw(){ctx.clearRect(0,0,W,H); const now=performance.now()/1000; for(let i=0;i<7;i++){const y=((now*10+i*120)%(H+200))-100,x=((i*321)%W); ctx.beginPath(); ctx.arc((x+i*50)%W,y,36+(i%3)*16,0,Math.PI*2); ctx.fillStyle=`hsla(${(i*45)%360} 90% 92% / .5)`; ctx.fill()}
+  if(slowMoT>0){ctx.save(); ctx.fillStyle='rgba(16,185,129,.12)'; ctx.fillRect(0,0,W,H); ctx.restore()}
+  for(const f of game.fruits){ctx.save(); ctx.font=`bold ${f.size}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Noto Emoji",sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(f.sym,f.x,f.y); ctx.restore()}
+  for(const p of game.parts){ctx.globalAlpha=Math.max(0,1-p.t/p.life); ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fillStyle=p.c; ctx.fill(); ctx.globalAlpha=1}
+  drawBasket()
+}
+function loop(t){if(!game.run) return; const rawDt=Math.min(0.033,(t-last)/1000||0); const dt=rawDt; last=t; update(dt,t); draw(); raf=requestAnimationFrame(loop)}
+function reset(){game.run=false; cancelAnimationFrame(raf); paused=false; game.score=0; game.miss=0; game.spawn=0; game.pointerX=null; game.fruits.length=0; game.parts.length=0; game.combo=0; comboEl.textContent=''; game.level=1; slowMoT=0; game.basket={x:W/2,y:H-100,w:200,h:34,spd:640,vx:0}; refreshHud(); draw()}
+function start(){overlay.classList.add('hide'); reset(); game.run=true; last=performance.now(); raf=requestAnimationFrame(loop)}
+function gameOver(){game.run=false; cancelAnimationFrame(raf); game.best=Math.max(game.best,game.score); localStorage.setItem('ff_best',String(game.best)); refreshHud(); setTimeout(()=>{overlay.classList.remove('hide'); overlay.querySelector('h1').textContent='GAME OVER'; overlay.querySelector('p').innerHTML=`スコア：<b>${game.score}</b>（BEST ${game.best}）　スペース/ボタンで再開`; startBtn.textContent='↻ リスタート'},120)}
+function togglePause(){if(!game.run)return; paused=!paused; overlay.classList.toggle('hide',!paused); overlay.querySelector('h1').textContent=paused?'PAUSED':'FALLING FRUITS'; overlay.querySelector('p').textContent=paused?'P で再開　スペースで新規スタート':'サイズ/速度はランダム。スコアで自動的に難易度UP。'; startBtn.textContent=paused?'▶ つづき':'▶ はじめる'}
+startBtn.addEventListener('click',()=>{if(!game.run||paused) start()});
+function boot(){const w=innerWidth,h=innerHeight; dpr=Math.min(devicePixelRatio||1,2); cv.width=w*dpr; cv.height=h*dpr; cv.style.width=w+'px'; cv.style.height=h+'px'; ctx.setTransform(dpr,0,0,dpr,0,0); W=w; H=h; reset(); bestEl.textContent=game.best}
+boot();
+})();
+</script>
+</body>
+</html>
